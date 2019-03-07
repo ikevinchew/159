@@ -1,0 +1,533 @@
+#include <SFE_BMP180.h>
+#include <Wire.h>
+#include <RGBmatrixPanel.h>
+
+//GPIO declarations
+//-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+byte segmentClock = 6;
+byte segmentLatch = 5; //bits are ready to send to output
+byte segmentData = 7;
+
+const int rainsensorPin = A6;
+const int windsensorPin = A4;
+const int ldrPin = A7;
+
+const int CLK = 11;
+const int OE = 9;
+const int LAT = 10;
+const int A = A0;
+const int B = A1;
+const int C = A2;
+const int D = A3;
+//24 to 29 occupied by matrix
+
+//-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+int number = 65;
+int temperature;
+int prevValue = 0;
+int prevLDR = 0;
+
+
+// Rain Sensor Constants
+const int sensorMin = 0;     // rain minimum
+const int sensorMax = 1024;  // rain maximum
+//soaked == case 0 = flood
+//little == case 1 == rain warning
+//dry == case 2 -- not raining
+
+
+//Temp/Pressure Constants
+SFE_BMP180 pressure;
+
+//Wind Sensor Constants
+int serial_in;
+
+//needed for max wind speed and voltage calculation
+double x, y, a, b = 0;
+
+//array variables that grab sensor values and turns into voltage
+const int numReadings = 10; //Defines number of reading to average out the incoming value
+int readings[numReadings]; // the readings from the analog input
+int readIndex = 0; // the index of the current reading
+int totalWind = 0; // the running total
+int averageWind = 0; // the average
+int windinputPin = A4;
+
+//analog to digital variables
+int windsensorValue = 0; //Variable stores the value direct from the analog pin
+float windsensorVoltage = 0; //Variable that stores the voltage (in Volts) from the anemometer being sent to the analog pin
+float windsensorVoltage2 = 0; //Variable that stores the voltage (in Volts) from the anemometer being sent to the analog pin
+float windSpeed = 0; // Wind speed in meters per second (m/s)
+
+float voltageConversionConstant = .004882814; //This constant analog (0 to 1023) -> V (0 to 5V)
+
+//anemometer specific constants
+float windvoltageMin = .4; // Mininum output voltage from anemometer in mV.
+float windSpeedMin = 0; // Wind speed in meters/sec corresponding to minimum voltage
+float windvoltageMax = 2.0; // Maximum output voltage from anemometer in mV.
+float windSpeedMax = 32; // Wind speed in meters/sec corresponding to maximum voltage
+
+//Matrix constants
+RGBmatrixPanel matrix(A, B, C, D, CLK, LAT, OE, false, 64);
+
+/****************************************SETUP*******************************************/
+void setup()
+{
+  matrix.begin();
+  matrix.fillScreen(matrix.Color333(0, 0, 0));
+
+  // draw some text!
+  matrix.setTextSize(1);     // size 1 == 8 pixels high
+  matrix.setTextWrap(false); // Don't wrap at end of line - will do ourselves
+
+  Serial.begin(9600);
+
+  //setup of wind sensor array
+  for (int thisReading = 0; thisReading < numReadings; thisReading++) {
+    readings[thisReading] = 0;
+  }
+
+
+
+  //7 segment
+  pinMode(segmentClock, OUTPUT);
+  pinMode(segmentData, OUTPUT);
+  pinMode(segmentLatch, OUTPUT);
+
+  digitalWrite(segmentClock, LOW);
+  digitalWrite(segmentData, LOW);
+  digitalWrite(segmentLatch, LOW);
+}
+
+/****************************************LOOP *************************************/
+void loop()
+{
+
+  tempSensor(number);
+  combineRainLDRWindSensor(number);
+  delay(500);
+}
+
+/*********************************************SENSORS*******************************************/
+
+void combineRainLDRWindSensor(int number) {
+
+  int ldrStatus = analogRead(ldrPin);
+  int sensorReading = analogRead(rainsensorPin);
+  windsensorValue = analogRead(windsensorPin); //Get a value between 0 and 1023 from the analog pin connected to the anemometer
+
+  int range = map(sensorReading, sensorMin, sensorMax, 0, 4);
+
+  // subtract the last reading:
+  totalWind = totalWind - readings[readIndex];
+  // read from the sensor:
+  readings[readIndex] = windsensorValue;
+  // add the reading to the total:
+  totalWind = totalWind + readings[readIndex];
+  // advance to the next position in the array:
+  readIndex = readIndex + 1;
+
+  // if we’re at the end of the array…
+  if (readIndex >= numReadings) {
+    // …wrap around to the beginning:
+    readIndex = 0;
+
+    // calculate the average:
+    averageWind = totalWind / numReadings;
+
+    windsensorVoltage = averageWind * voltageConversionConstant; //Convert sensor value to actual voltage
+
+    //Convert voltage value to wind speed using range of max and min voltages and wind speed for the anemometer
+    if (windsensorVoltage <= windvoltageMin) {
+      windSpeed = 0; //Check if voltage is below minimum value. If so, set wind speed to zero.
+    } else {
+      windSpeed = ((windsensorVoltage - windvoltageMin) * windSpeedMax / (windvoltageMax - windvoltageMin)) * 2.232694;
+
+    }
+  }
+
+  //flooding
+  switch (range) {
+    case 0:
+      number = 45;
+      break;
+
+    //medium rain
+    case 1:
+      number = 55;
+      break;
+
+    //no rain
+    case 2:
+      number = 65;
+      break;
+
+    default:
+      break;
+  }
+
+  //Print voltage and windspeed to serial A value of 0.4V represents no wind and 2V represents a wind speed of 32.4 m/s.
+  //The relationship between voltage and wind speed is linear, meaning that each increase of 0.1V represents an increase of 2.025 m/s in wind speed.
+    Serial.print("Voltage: ");
+    Serial.println(windsensorVoltage);
+    Serial.print("Wind speed: ");
+    Serial.println(windSpeed);
+    
+  //morning dry
+  if (number == 65 && ldrStatus < 450 && windSpeed > 3) {
+    //write to matrix
+    Serial.println("It's dry and sunny!");
+    Serial.print("Current ldr status: ");
+    Serial.println(ldrStatus);
+
+    Serial.println("too windy");
+
+    delay(500);
+
+    //  if (windSpeed > 2 && windSpeed <= 5 ) {
+    //also windspeed < 2 no wind
+
+  }
+
+  //late afternoon dry
+  else if (number == 65 && (ldrStatus >= 450 && ldrStatus < 700) ) {
+    //write to matrix
+    Serial.println("It's dry and sunset! Turn headlights on!");
+    Serial.print("Current ldr status: ");
+    Serial.println(ldrStatus);
+    delay(500);
+  }
+
+  //night dry
+  else if (number == 65 && ldrStatus >= 700) {
+    //write to matrix
+    Serial.println("It's dry and dark! Turn headlights on!");
+    Serial.print("Current ldr status: ");
+    Serial.println(ldrStatus);
+    delay(500);
+  }
+
+  //morning medium rain
+  else if (number == 55 && ldrStatus < 450) {
+    //write to matrix
+    Serial.println("It's raining. Drive a little slower! ");
+    Serial.print("Current ldr status: ");
+    Serial.println(ldrStatus);
+    delay(500);
+  }
+
+  //late afternoon medium rain
+  else if (number == 55 && (ldrStatus >= 450 && ldrStatus < 700) ) {
+    //write to matrix
+    Serial.println("It's raining and the sun is setting. Turn on your headlights!");
+    Serial.print("Current ldr status: ");
+    Serial.println(ldrStatus);
+    delay(500);
+  }
+
+  //night medium rain
+  else if (number == 55 && ldrStatus >= 700) {
+    //write to matrix
+    Serial.println("It's raining. Turn on your headlights! ");
+    Serial.print("Current ldr status: ");
+    Serial.println(ldrStatus);
+    delay(500);
+  }
+
+  //morning flood
+  else if (number == 45 && ldrStatus < 450) {
+    //write to matrix
+    Serial.println("It's flooding. Be careful! Turn on your headlights! ");
+    Serial.print("Current ldr status: ");
+    Serial.println(ldrStatus);
+    delay(500);
+  }
+
+  //late afternoon flood
+  else if (number == 45 && (ldrStatus >= 450 && ldrStatus < 700) ) {
+    //write to matrix
+    Serial.println("It's flooding and the sun is setting. Be careful! Turn on your headlights!");
+    Serial.print("Current ldr status: ");
+    Serial.println(ldrStatus);
+    delay(500);
+  }
+
+  //night flood
+  else if (number == 45 && ldrStatus >= 700) {
+    //write to matrix
+    Serial.println("It's flooding and dark. Be careful! Turn on your headlights! ");
+    Serial.print("Current ldr status: ");
+    Serial.println(ldrStatus);
+    delay(500);
+  }
+
+  else {
+    number = 65;
+    Serial.println("sensors not working");
+    Serial.println(ldrStatus);
+
+  }
+
+  //display number to screen afterwards
+  showNumber(number);
+  matrixDisplay(number, ldrStatus, windSpeed);
+  prevValue = number;
+  prevLDR = ldrStatus;
+}
+
+void tempSensor(int number) {
+
+  int altitude = 56; //irvine altitude
+  char status;
+  double T, P, p0, a;
+
+  // Start a temperature measurement:
+  pressure.begin();
+  status = pressure.startTemperature();
+
+  delay(status);
+
+  status = pressure.getTemperature(T);
+  double temp = (9.0 / 5.0) * T + 32.0;
+  temperature = (int)temp;
+  // Print out the measurement:
+  Serial.print("temperature: ");
+  Serial.print((9.0 / 5.0)*T + 32.0, 2);
+  Serial.println(" F");
+
+  // Start a pressure measurement:
+  // The parameter is the oversampling setting, from 0 to 3 (highest res, longest wait).
+
+  status = pressure.startPressure(3);
+
+  delay(status);
+
+  // Retrieve the completed pressure measurement:
+  // Note that the measurement is stored in the variable P.
+  // Note also that the function requires the previous temperature measurement (T).
+  // (If temperature is stable, you can do one temperature measurement for a number of pressure measurements.)
+  // Function returns 1 if successful, 0 if failure.
+
+  status = pressure.getPressure(P, T);
+
+  // Print out the measurement:
+  Serial.print("absolute pressure: ");
+  Serial.print(P, 2);
+  Serial.println(" mb ");
+
+  // Parameters: P = absolute pressure in mb, ALTITUDE = current altitude in m.
+  // Result: p0 = sea-level compensated pressure in mb
+
+  p0 = pressure.sealevel(P, altitude); // we're at 1655 meters (Boulder, CO)
+  Serial.print("relative (sea-level) pressure: ");
+  Serial.print(p0, 2);
+  Serial.println(" mb ");
+
+  delay(3000);
+}
+
+
+void windSensor(int number) {
+
+
+
+
+
+}
+
+/*********************************************7 SEGMENT DISPLAY*******************************************/
+//Takes a number and displays 2 numbers. Displays absolute value (no negatives)
+void showNumber(float value)
+{
+  int number = abs(value); //Remove negative signs and any decimals
+
+  for (byte x = 0 ; x < 2 ; x++) {
+    int remainder = number % 10;
+    postNumber(remainder, false);
+    number /= 10;
+  }
+
+  //Latch the current segment data
+  digitalWrite(segmentLatch, LOW);
+  digitalWrite(segmentLatch, HIGH); //Register moves storage register on the rising edge of RCK
+}
+
+//Given a number, or '-', shifts it out to the display
+void postNumber(byte number, boolean decimal)
+{
+  byte segments;
+
+  //don't need to touch
+#define a  1<<0
+#define b  1<<6
+#define c  1<<5
+#define d  1<<4
+#define e  1<<3
+#define f  1<<1
+#define g  1<<2
+#define dp 1<<7
+
+  //this code turns on the light of the segment based on the case "number"
+  switch (number)
+  {
+    case 1: segments = b | c; break;
+    case 2: segments = a | b | d | e | g; break;
+    case 3: segments = a | b | c | d | g; break;
+    case 4: segments = f | g | b | c; break;
+    case 5: segments = a | f | g | c | d; break;
+    case 6: segments = a | f | g | e | c | d; break;
+    case 7: segments = a | b | c; break;
+    case 8: segments = a | b | c | d | e | f | g; break;
+    case 9: segments = a | b | c | d | f | g; break;
+    case 0: segments = a | b | c | d | e | f; break;
+    case ' ': segments = 0; break;
+    case 'c': segments = g | e | d; break;
+    case '-': segments = g; break;
+  }
+
+  if (decimal) segments |= dp;
+
+  //Clock these bits out to the drivers
+  for (byte x = 0 ; x < 8 ; x++)
+  {
+    digitalWrite(segmentClock, LOW);
+    digitalWrite(segmentData, segments & 1 << (7 - x));
+    digitalWrite(segmentClock, HIGH); //Data transfers to the register on the rising edge of SRCK
+  }
+
+}
+
+// Input a value 0 to 24 to get a color value.
+// The colours are a transition r - g - b - back to r.
+uint16_t Wheel(byte WheelPos) {
+  if (WheelPos < 8) {
+    return matrix.Color333(7 - WheelPos, WheelPos, 0);
+  } else if (WheelPos < 16) {
+    WheelPos -= 8;
+    return matrix.Color333(0, 7 - WheelPos, WheelPos);
+  } else {
+    WheelPos -= 16;
+    return matrix.Color333(0, WheelPos, 7 - WheelPos);
+  }
+}
+
+
+void matrixDisplay(int number, int ldrStatus, float windspeed) {
+  matrix.setTextSize(1);
+  matrix.setTextWrap(false);
+
+  char sunny[] = "Sunny!!Drive Safe";
+  char e_sunny[] = "Sunset!Lights ON!!";
+  char n_clear[] = "Night!Lights ON";
+  char d_rain[] = "RAINING!Drive Slower!";
+  char rain[] = "RAIN!Turnon lights!!";
+  char d_flood[] = "FLOOD:DRIVE SAFE!!";
+  char n_flood[] = "FLOOD:BESAFE AND TURNON LIGHTS";
+  char wind[] = "EXTREMEWINDS!!";
+
+  uint8_t w = 0;
+
+  if ((prevValue != number) ||(ldrStatus - prevLDR > 1 ||ldrStatus - prevLDR < -1)) {
+    Serial.println(windSpeed);
+    matrix.fillScreen(matrix.Color333(0, 0, 0));
+    matrix.setCursor(1, 24);
+    matrix.setTextColor(matrix.Color333(7, 0, 0));
+    matrix.print("TEMP: ");
+    matrix.drawRect(29, 24, 35, 8, matrix.Color333(0, 0, 0));
+    matrix.setCursor(29, 24);
+    matrix.setTextColor(matrix.Color333(7, 0, 0));
+    matrix.print(temperature);
+    matrix.print('F');
+    if (number == 65 && ldrStatus < 450) {
+      matrix.setCursor(1, 0);
+      for (w = 0; w < 7; w++) {
+        matrix.setTextColor(matrix.Color333(7, 0, 0));
+        matrix.print(sunny[w]);
+      }
+      matrix.setCursor(1, 8);
+      for (w = 7; w < 17; w++) {
+        matrix.setTextColor(matrix.Color333(7, 0, 0));
+        matrix.print(sunny[w]);
+      }
+    }else if(number ==65 && (ldrStatus >= 450 && ldrStatus < 700)){
+      matrix.setCursor(1, 0);
+      for(w = 0; w < 7; w++){
+        matrix.setTextColor(matrix.Color333(7, 3, 0));
+        matrix.print(e_sunny[w]);
+      }
+      matrix.setCursor(1, 8);
+      for(w = 7; w < 18; w++){
+        matrix.setTextColor(matrix.Color333(7, 3, 0));
+        matrix.print(e_sunny[w]);
+      }
+     }else if(number == 65 && ldrStatus >= 700){
+      matrix.setCursor(1, 0);
+      for(w = 0; w < 6; w++){
+        matrix.setTextColor(matrix.Color333(7, 3, 0));
+        matrix.print(n_clear[w]);
+      }
+      matrix.setCursor(1, 8);
+      for(w = 6; w < 15; w++){
+        matrix.setTextColor(matrix.Color333(7, 3, 0));
+        matrix.print(n_clear[w]);
+      }
+    }else if (number == 55 && ldrStatus < 450) {
+      matrix.setCursor(1, 0);
+      for (w = 0; w < 9; w++) {
+        matrix.setTextColor(matrix.Color333(7, 0, 0));
+        matrix.print(d_rain[w]);
+      }
+      matrix.setCursor(1, 8);
+      for (w = 9; w < 21; w++) {
+        matrix.setTextColor(matrix.Color333(7, 0, 0));
+        matrix.print(d_rain[w]);
+      }
+    }else if((number == 55 && (ldrStatus >= 450 && ldrStatus < 700)) ||(number == 55 && ldrStatus >= 700)){
+      matrix.setCursor(1, 0);
+      for (w = 0; w < 9; w++) {
+        matrix.setTextColor(matrix.Color333(7, 0, 0));
+        matrix.print(rain[w]);
+      }
+      matrix.setCursor(1, 8);
+      for (w = 9; w < 20; w++) {
+        matrix.setTextColor(matrix.Color333(7, 0, 0));
+        matrix.print(rain[w]);
+      }
+    }else if(number == 45 && ldrStatus < 450){
+        matrix.setCursor(1, 0);
+        for (w = 0; w < 6; w++) {
+          matrix.setTextColor(matrix.Color333(7, 0, 0));
+          matrix.print(d_flood[w]);
+        }
+        matrix.setCursor(1, 8);
+        for (w = 6; w < 12; w++) {
+          matrix.setTextColor(matrix.Color333(7, 0, 0));
+          matrix.print(d_flood[w]);
+        }
+    }else if((number == 45 && (ldrStatus >= 450 && ldrStatus < 700)) || (number == 45 && ldrStatus >= 700)){
+        matrix.setCursor(1, 0);
+        for (w = 0; w < 8; w++) {
+          matrix.setTextColor(matrix.Color333(7, 0, 0));
+          matrix.print(n_flood[w]);
+        }
+        matrix.setCursor(1, 8);
+        for (w = 8; w < 30; w++) {
+          matrix.setTextColor(matrix.Color333(7, 0, 0));
+          matrix.print(n_flood[w]);
+        }
+    }
+    if(windspeed > 2.0){
+        matrix.fillScreen(matrix.Color333(0, 0, 0));
+        matrix.setCursor(1, 0);
+        for (w = 0; w < 7; w++) {
+          matrix.setTextColor(matrix.Color333(7, 0, 0));
+          matrix.print(wind[w]);
+        }
+        matrix.setCursor(1, 8);
+        for (w = 7; w < 14; w++) {
+          matrix.setTextColor(matrix.Color333(7, 0, 0));
+          matrix.print(wind[w]);
+        }
+    }
+  }
+}
